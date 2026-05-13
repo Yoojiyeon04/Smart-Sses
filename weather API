@@ -1,0 +1,31 @@
+import RPi.GPIO as GPIO
+import requests
+import time
+
+BUTTON_PIN = 17
+API_KEY = "f3078967408847dcabc140843252411"
+CITY = "Cheonan"
+URL = f"https://api.openweathermap.org/data/2.5/weather?q={CITY}&appid={API_KEY}&units=metric&lang=kr"
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+def get_weather():
+    res = requests.get(URL)
+    data = res.json()
+
+    temp = data["main"]["temp"]
+    weather = data["weather"][0]["description"]
+
+    print(f"현재 날씨: {weather}")
+    print(f"현재 기온: {temp}도")
+
+try:
+    while True:
+        if GPIO.input(BUTTON_PIN) == GPIO.LOW:
+            print("버튼 눌림 - 날씨 정보 가져오는 중...")
+            get_weather()
+            time.sleep(1)
+
+except KeyboardInterrupt:
+    GPIO.cleanup()
