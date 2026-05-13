@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import time
+import sys
+import signal
+from dataclasses import dataclass
+from typing import Tuple
+
+try:
+    import cv2
+    from picamera2 import Picamera2
+    from ultralytics import YOLO
+except Exception as e:
+    print("Import error:", e)
+    print("Install example:")
+    print("sudo apt install -y python3-picamera2 python3-opencv")
+    print("pip install ultralytics")
+    sys.exit(1)
+
+
+@dataclass
+class Config:
+    MODEL_PATH: str = "yolov8n.pt"
+
+    CAMERA_SIZE: Tuple[int, int] = (320, 240)
+    YOLO_IMGSZ: int = 224
+    CONF_THRES: float = 0.45
+
+    DETECT_INTERVAL: float = 0.5
+    SHOW_SCREEN: bool = False
+
+
+CFG = Config()
+RUNNING = True
+
+LABEL_KO = {
+    "person": "person",
+    "car": "car",
+    "bus": "bus",
+    "truck": "truck",
+    "chair": "chair",
+    "clock": "clock",
+    "bicycle": "bicycle",
+    "motorcycle": "motorcycle",
+}
+
+TARGET_CLASSES = set(LABEL_KO.keys())
+
+
+def stop_program(signum, frame):
+    global RUNNING
+    RUNNING = False
+
+
+signal.signal(signal.SIGINT, stop_program)
+signal.signal(signal.SIGTERM, stop_program)
+
+
+def get_position(x_center, width):
+    if x_center < width * 0.4:
+        return "left"
+    elif x_center > width * 0.6:
+        return "right"
+    else:
+        return "front"
+
+
+def get_area_ratio(x1, y1, x2, y2, width, height):
+    box_area = max(0, x2 - x1) * max(0, y2 - y1)
+    frame_area = width * height
+    return box_area / frame_area
+
+
+def main():
+    global RUNNING
+
+    print("Loading YOLO model...")
+    model = YOLO(CFG.MODEL_PATH)
+    print("YOLO loaded")
+
+    picam2 = Picamera2()
+    camera_config = picam2.create_preview_configuration(
+        main={"size": CFG.CAMERA_SIZE, "format": "RGB888"},
+        buffer_count=3,
+    )
+    picam2.configure(camera_config)
+    picam2.start()
+    time.sleep(1)
+
+    print("Camera started")
+    print("Press Ctrl + C to stop")
+
+    last_detect_time = 0
+    last_message = ""
+    last_message_time = 0
+
+    try:
+        while RUNNING:
+            frame = picam2.capture_array()
+            now = time.time()
+
+            if now - last_detect_time >= CFG.DETECT_INTERVAL:
+                last_detect_time = now
+
+                try:
+                    results = model.predict(
+                        source=frame,
+                        imgsz=CFG.YOLO_IMGSZ,
+                        conf=CFG.CONF_THRES,
+                        verbose=False,
+                        max_det=3,
+                    )
+
+                    height, width = frame.shape[:2]
+                    nearest = None
+                    biggest_area = 0
+
+                    if results and results[0].boxes is not None:
+                        names = results[0].names
+
+                        for box in results[0].boxes:
+                            cls_id = int(box.cls[0])
+                            label = names.get(cls_id, str(cls_id))
+
+                            if label not in TARGET_CLASSES:
+                                continue
+
+                            x1, y1, x2, y2 = map(float, box.xyxy[0].tolist())
+                            area_ratio = get_area_ratio(x1, y1, x2, y2, width, height)
+
+                            if area_ratio > biggest_area:
+                                biggest_area = area_ratio
+                                x_center = (x1 + x2) / 2
+                                position = get_position(x_center, width)
+                                nearest = (label, position, area_ratio)
+
+                    if nearest is not None:
+                        label, position, area_ratio = nearest
+
+                        if area_ratio >= 0.12:
+                            distance_text = "very close"
+                        elif area_ratio >= 0.05:
+                            distance_text = "close"
+                        else:
+                            distance_text = "detected"
+
+                        message = f"{position} {label} {distance_text}"
+
+                        if message != last_message or now - last_message_time > 2.5:
+                            print(message)
+                            last_message = message
+                            last_message_time = now
+                    else:
+                        print("no target")
+
+                except Exception as e:
+                    print("YOLO error:", e)
+                    time.sleep(0.2)
+
+            if CFG.SHOW_SCREEN:
+                cv2.imshow("Camera", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+
+            time.sleep(0.03)
+
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        print("Stopping...")
+        picam2.stop()
+        cv2.destroyAllWindows()
+        print("Done")
+
+
+if __name__ == "__main__":
+    main()
